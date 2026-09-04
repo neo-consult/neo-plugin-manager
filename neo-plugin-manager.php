@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Neo Plugin Manager
  * Description: Installiert und aktualisiert freigegebene Neo-Plugins aus dem offiziellen GitHub-Katalog.
- * Version: 0.1.2
+ * Version: 0.1.3
  * Requires at least: 6.0
  * Requires PHP: 8.1
  * Author: Neo Consult
@@ -82,6 +82,9 @@ final class NeoPluginManager
     private static function isValidPluginRecord(mixed $plugin): bool
     {
         if (!is_array($plugin)) {
+            return false;
+        }
+        if (($plugin['published'] ?? true) !== true) {
             return false;
         }
         foreach (['slug', 'plugin_file', 'name', 'version', 'package', 'sha256'] as $field) {
