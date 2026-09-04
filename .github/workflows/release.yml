@@ -76,6 +76,7 @@ jobs:
           entry['version'] = os.environ['RELEASE_TAG'].removeprefix('v')
           entry['package'] = f"https://github.com/{os.environ['REPOSITORY']}/releases/download/{os.environ['RELEASE_TAG']}/{slug}.zip"
           entry['sha256'] = os.environ['RELEASE_SHA256']
+          entry['published'] = True
           path.write_text(json.dumps(catalog, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
           PY
 
