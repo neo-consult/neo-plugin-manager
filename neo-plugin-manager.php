@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Neo Plugin Manager
  * Description: Installiert und aktualisiert freigegebene Neo-Plugins aus dem offiziellen GitHub-Katalog.
- * Version: 0.1.0
+ * Version: 0.1.1
  * Requires at least: 6.0
  * Requires PHP: 8.1
  * Author: Neo Consult
@@ -22,12 +22,16 @@ final class NeoPluginManager
     private const DEFAULT_CATALOG_URL = 'https://raw.githubusercontent.com/neo-consult/neo-plugin-catalog/main/plugins.json';
     private const CACHE_KEY = 'neo_plugin_manager_catalog';
 
+    /** @var array<string, string> */
+    private static array $pendingPackageHashes = [];
+
     public static function init(): void
     {
         add_action('admin_menu', [self::class, 'registerPage']);
         add_action('admin_init', [self::class, 'registerSettings']);
         add_filter('pre_set_site_transient_update_plugins', [self::class, 'injectUpdates']);
         add_filter('plugins_api', [self::class, 'pluginInformation'], 10, 3);
+        add_filter('upgrader_pre_download', [self::class, 'verifyPackageDownload'], 10, 4);
         add_action('admin_post_neo_plugin_manager_install', [self::class, 'installPlugin']);
     }
 
@@ -80,12 +84,13 @@ final class NeoPluginManager
         if (!is_array($plugin)) {
             return false;
         }
-        foreach (['slug', 'plugin_file', 'name', 'version', 'package'] as $field) {
+        foreach (['slug', 'plugin_file', 'name', 'version', 'package', 'sha256'] as $field) {
             if (!is_string($plugin[$field] ?? null) || $plugin[$field] === '') {
                 return false;
             }
         }
-        return wp_parse_url($plugin['package'], PHP_URL_SCHEME) === 'https';
+        return wp_parse_url($plugin['package'], PHP_URL_SCHEME) === 'https'
+            && preg_match('/^[a-f0-9]{64}$/', $plugin['sha256']) === 1;
     }
 
     public static function injectUpdates(object $transient): object
@@ -139,6 +144,49 @@ final class NeoPluginManager
         return $result;
     }
 
+    /**
+     * Verifiziert Neo-Pakete vor dem Entpacken im WordPress-Upgrader.
+     */
+    public static function verifyPackageDownload(mixed $reply, string $package, object $upgrader, array $hookExtra): mixed
+    {
+        if ($reply !== false) {
+            return $reply;
+        }
+
+        $expectedHash = self::$pendingPackageHashes[$package] ?? null;
+        if ($expectedHash === null && isset($hookExtra['plugin'])) {
+            $plugin = self::findCatalogPluginByFile((string) $hookExtra['plugin']);
+            $expectedHash = $plugin['sha256'] ?? null;
+        }
+        if (!is_string($expectedHash) || !preg_match('/^[a-f0-9]{64}$/', $expectedHash)) {
+            return $reply;
+        }
+
+        require_once ABSPATH . 'wp-admin/includes/file.php';
+        $download = download_url($package, 300);
+        if (is_wp_error($download)) {
+            return $download;
+        }
+        $actualHash = hash_file('sha256', $download);
+        if (!is_string($actualHash) || !hash_equals($expectedHash, $actualHash)) {
+            wp_delete_file($download);
+            return new WP_Error('neo_plugin_checksum_mismatch', 'Die Prüfsumme des Plugin-Pakets stimmt nicht mit dem offiziellen Katalog überein.');
+        }
+
+        return $download;
+    }
+
+    /** @return array<string, mixed>|null */
+    private static function findCatalogPluginByFile(string $pluginFile): ?array
+    {
+        foreach (self::getCatalog() as $plugin) {
+            if ($plugin['plugin_file'] === $pluginFile) {
+                return $plugin;
+            }
+        }
+        return null;
+    }
+
     public static function installPlugin(): void
     {
         if (!current_user_can('install_plugins')) {
@@ -157,7 +205,12 @@ final class NeoPluginManager
         require_once ABSPATH . 'wp-admin/includes/class-wp-upgrader-skins.php';
         require_once ABSPATH . 'wp-admin/includes/plugin-install.php';
         $upgrader = new Plugin_Upgrader(new Automatic_Upgrader_Skin());
-        $installed = $upgrader->install($plugin['package']);
+        self::$pendingPackageHashes[$plugin['package']] = $plugin['sha256'];
+        try {
+            $installed = $upgrader->install($plugin['package']);
+        } finally {
+            unset(self::$pendingPackageHashes[$plugin['package']]);
+        }
         $notice = $installed ? 'installed' : 'failed';
         wp_safe_redirect(add_query_arg('neo_plugin_manager_notice', $notice, admin_url('tools.php?page=neo-plugin-manager')));
         exit;
